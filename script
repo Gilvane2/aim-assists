@@ -1,0 +1,890 @@
+-- InfinityNex Cheats v1.2 | Aim Assist + ESP + AutoFire
+-- Local: StarterPlayer > StarterPlayerScripts (LocalScript)
+local Players       = game:GetService("Players")
+local RunService    = game:GetService("RunService")
+local UIS           = game:GetService("UserInputService")
+local TweenService  = game:GetService("TweenService")
+local Workspace     = game:GetService("Workspace")
+
+local LP     = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+local PGui   = LP:WaitForChild("PlayerGui")
+
+--=====================================================================
+-- CONFIG
+--=====================================================================
+local Config = {
+	Aim = {
+		Enabled=false, ShowFOV=true, Radius=120,
+		Color=Color3.fromRGB(0,200,255), Transparency=0.5, Thickness=1.5,
+		MaxDist=500, Smooth=0.28, Intensity=1,
+		TargetPart="Torso",           -- "Head" ou "Torso"
+		TeamCheck=true, Key=Enum.KeyCode.Z,
+	},
+	ESP = {
+		Enabled=false, Name=true, Dist=true, Health=true,
+		Line=true, Box=false, TeamCheck=true,
+		Color=Color3.fromRGB(0,200,255), TextColor=Color3.fromRGB(255,255,255),
+	},
+	AutoFire = {
+		Enabled=false, MaxDist=40, Delay=0.12, RequireAim=true,
+	},
+}
+
+--=====================================================================
+-- UTIL
+--=====================================================================
+local U = {}
+
+function U.mk(class, props)
+	local i = Instance.new(class)
+	local parent
+	for k,v in pairs(props or {}) do
+		if k == "Parent" then
+			parent = v
+		else
+			pcall(function() i[k] = v end)
+		end
+	end
+	if parent then i.Parent = parent end
+	return i
+end
+
+function U.corner(p, r)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, r or 8)
+	c.Parent = p
+	return c
+end
+
+function U.stroke(p, c, t, tr)
+	local s = Instance.new("UIStroke")
+	s.Color = c or Color3.fromRGB(55,55,70)
+	s.Thickness = t or 1
+	s.Transparency = tr or 0
+	pcall(function() s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border end)
+	s.Parent = p
+	return s
+end
+
+function U.ally(p)
+	return p.Team ~= nil and p.Team == LP.Team
+end
+
+function U.alive(p)
+	local c = p.Character
+	if not c or not c.Parent then return nil end
+	local h = c:FindFirstChildOfClass("Humanoid")
+	local r = c:FindFirstChild("HumanoidRootPart")
+	if not h or not r or h.Health <= 0 then return nil end
+	return c, h, r
+end
+
+--=====================================================================
+-- VISUAL (FOV + ESP LINES)
+--=====================================================================
+local VGui = U.mk("ScreenGui",{
+	Name="INX_Visuals", ResetOnSpawn=false, IgnoreGuiInset=true,
+	ZIndexBehavior=Enum.ZIndexBehavior.Sibling, DisplayOrder=5, Parent=PGui})
+
+local FOV = U.mk("Frame",{
+	Name="FOV", AnchorPoint=Vector2.new(0.5,0.5), Position=UDim2.fromScale(0.5,0.5),
+	Size=UDim2.fromOffset(240,240), BackgroundTransparency=1, Visible=false, Parent=VGui})
+U.corner(FOV, 9999)
+local FOVs = U.stroke(FOV, Config.Aim.Color, 1.5, 0.5)
+
+local LineHolder = U.mk("Frame",{
+	Name="Lines", Size=UDim2.fromScale(1,1), BackgroundTransparency=1,
+	ZIndex=2, Parent=VGui})
+
+local function refreshFOV()
+	local r = Config.Aim.Radius
+	FOV.Size = UDim2.fromOffset(r*2, r*2)
+	FOVs.Color = Config.Aim.Color
+	FOVs.Thickness = Config.Aim.Thickness
+	FOVs.Transparency = Config.Aim.Transparency
+	FOV.Visible = Config.Aim.Enabled and Config.Aim.ShowFOV
+end
+refreshFOV()
+
+--=====================================================================
+-- AIM ASSIST
+--=====================================================================
+local Aim = {}
+
+function Aim.find()
+	local fov  = Config.Aim.Radius
+	local maxD = Config.Aim.MaxDist
+	local c    = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+	local cp   = Camera.CFrame.Position
+	local best, bd = nil, math.huge
+	for _,p in ipairs(Players:GetPlayers()) do
+		if p ~= LP and not (Config.Aim.TeamCheck and U.ally(p)) then
+			local char,_,root = U.alive(p)
+			if char and (root.Position - cp).Magnitude <= maxD then
+				local part = char:FindFirstChild(Config.Aim.TargetPart) or root
+				local sp, on = Camera:WorldToViewportPoint(part.Position)
+				if on and sp.Z > 0 then
+					local d = (Vector2.new(sp.X, sp.Y) - c).Magnitude
+					if d <= fov and d < bd then best, bd = p, d end
+				end
+			end
+		end
+	end
+	return best
+end
+
+function Aim.step(dt)
+	if not Config.Aim.Enabled then return end
+	local t = Aim.find()
+	if not t then return end
+	local char = t.Character
+	if not char then return end
+	local part = char:FindFirstChild(Config.Aim.TargetPart)
+		or char:FindFirstChild("HumanoidRootPart")
+	if not part then return end
+	local goal = CFrame.new(Camera.CFrame.Position, part.Position)
+	local a = math.clamp(Config.Aim.Smooth * Config.Aim.Intensity * dt * 60, 0, 1)
+	Camera.CFrame = Camera.CFrame:Lerp(goal, a)
+end
+
+--=====================================================================
+-- AUTO FIRE
+--=====================================================================
+local AutoFire = {}
+local lastFire = 0
+
+function AutoFire.step()
+	if not Config.AutoFire.Enabled then return end
+	if Config.AutoFire.RequireAim and not Config.Aim.Enabled then return end
+
+	local char = LP.Character
+	if not char then return end
+	local tool = char:FindFirstChildOfClass("Tool")
+	if not tool or not tool.Enabled then return end
+
+	local target = Aim.find()
+	if not target then return end
+
+	local _,_,root = U.alive(target)
+	if not root then return end
+
+	local dist = (root.Position - Camera.CFrame.Position).Magnitude
+	if dist > Config.AutoFire.MaxDist then return end
+
+	local now = tick()
+	if now - lastFire < Config.AutoFire.Delay then return end
+	lastFire = now
+	pcall(function() tool:Activate() end)
+end
+
+--=====================================================================
+-- ESP
+--=====================================================================
+local ESP = {}
+local tracked = {}
+
+local function makeLine()
+	return U.mk("Frame",{
+		Name="LN", AnchorPoint=Vector2.new(0.5,0.5),
+		BackgroundColor3=Config.ESP.Color, BorderSizePixel=0,
+		Size=UDim2.fromOffset(0, 1.5), Visible=false, ZIndex=2, Parent=LineHolder})
+end
+
+function ESP.remove(p)
+	local d = tracked[p]
+	if not d then return end
+	if d.bill and d.bill.Parent then d.bill:Destroy() end
+	if d.hl   and d.hl.Parent   then d.hl:Destroy()   end
+	if d.line and d.line.Parent then d.line:Destroy() end
+	if d.box  and d.box.Parent  then d.box:Destroy()  end
+	tracked[p] = nil
+end
+
+function ESP.clear()
+	for p in pairs(tracked) do ESP.remove(p) end
+end
+
+function ESP.build(p)
+	ESP.remove(p)
+	local char = p.Character
+	if not char or not char.Parent then return end
+	local head = char:WaitForChild("Head", 3)
+	local hum  = char:FindFirstChildOfClass("Humanoid")
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not (head and hum and root) then return end
+
+	local bill = U.mk("BillboardGui",{
+		Name="INX_Bill", Size=UDim2.fromOffset(220,44),
+		StudsOffset=Vector3.new(0,3,0), AlwaysOnTop=true,
+		Adornee=head, Parent=head})
+
+	local nameL = U.mk("TextLabel",{
+		Size=UDim2.new(1,0,0,18), BackgroundTransparency=1,
+		Font=Enum.Font.GothamBold, TextSize=14,
+		TextStrokeTransparency=0.3, TextColor3=Config.ESP.TextColor,
+		Text=p.Name, Parent=bill})
+
+	local infoL = U.mk("TextLabel",{
+		Position=UDim2.new(0,0,0,18), Size=UDim2.new(1,0,0,16),
+		BackgroundTransparency=1, Font=Enum.Font.GothamMedium,
+		TextSize=12, TextStrokeTransparency=0.3,
+		TextColor3=Config.ESP.TextColor, Text="", Parent=bill})
+
+	local hl = U.mk("Highlight",{
+		Name="INX_HL", Adornee=char,
+		FillColor=Config.ESP.Color, FillTransparency=0.75,
+		OutlineColor=Config.ESP.Color, OutlineTransparency=0.25,
+		DepthMode=Enum.HighlightDepthMode.AlwaysOnTop, Parent=char})
+
+	local box
+	if Config.ESP.Box then
+		local hHeight = hum.HipHeight or 2
+		local hSize   = (hum.RigType == Enum.HumanoidRigType.R15) and 3 or 2
+		local boxSize = Vector3.new(hSize + 1.2, hHeight + 3, hSize + 1.2)
+		box = U.mk("BoxHandleAdornment",{
+			Name="INX_Box", Adornee=root, Size=boxSize,
+			Color3=Config.ESP.Color, Transparency=0.7,
+			AlwaysOnTop=true, ZIndex=5, Parent=root})
+	end
+
+	local line = makeLine()
+
+	tracked[p] = {
+		bill=bill, nameL=nameL, infoL=infoL, hl=hl, line=line, box=box,
+		char=char, head=head, hum=hum, root=root,
+	}
+end
+
+function ESP.step()
+	if not Config.ESP.Enabled then
+		if next(tracked) then ESP.clear() end
+		return
+	end
+
+	local vs = Camera.ViewportSize
+	local cx, cy = vs.X/2, vs.Y
+
+	for p, d in pairs(tracked) do
+		local char = p.Character
+		if not char or char ~= d.char or not d.hum or d.hum.Health <= 0
+			or not d.head.Parent or not d.root.Parent then
+			ESP.remove(p)
+			continue
+		end
+
+		if Config.ESP.TeamCheck and U.ally(p) then
+			d.bill.Enabled = false
+			d.hl.Enabled = false
+			d.line.Visible = false
+			if d.box then d.box.Visible = false end
+			continue
+		end
+
+		d.bill.Enabled = true
+		d.hl.Enabled = true
+		d.hl.FillColor = Config.ESP.Color
+		d.hl.OutlineColor = Config.ESP.Color
+		if d.box and d.box.Parent then
+			d.box.Visible = true
+			d.box.Color3 = Config.ESP.Color
+		end
+
+		d.nameL.Visible = Config.ESP.Name
+		d.nameL.Text = p.Name
+		d.nameL.TextColor3 = Config.ESP.TextColor
+
+		local dist = (d.root.Position - Camera.CFrame.Position).Magnitude
+		local txt = {}
+		if Config.ESP.Dist   then table.insert(txt, string.format("%dm", math.floor(dist))) end
+		if Config.ESP.Health then table.insert(txt, string.format("%d HP", math.floor(d.hum.Health))) end
+		d.infoL.Text = table.concat(txt, "  |  ")
+		d.infoL.Visible = #txt > 0
+		d.infoL.TextColor3 = Config.ESP.TextColor
+
+		if Config.ESP.Line then
+			local wp, on = Camera:WorldToViewportPoint(d.head.Position + Vector3.new(0,1.2,0))
+			if on and wp.Z > 0 then
+				local from = Vector2.new(cx, cy)
+				local to   = Vector2.new(wp.X, wp.Y)
+				local diff = to - from
+				local len  = diff.Magnitude
+				local mid  = (from + to)/2
+				local ang  = math.deg(math.atan2(diff.Y, diff.X))
+				d.line.Visible  = true
+				d.line.Position = UDim2.fromOffset(mid.X, mid.Y)
+				d.line.Size     = UDim2.fromOffset(math.max(len,1), 1.5)
+				d.line.Rotation = ang
+				d.line.BackgroundColor3 = Config.ESP.Color
+				d.line.BackgroundTransparency = 0.15
+			else
+				d.line.Visible = false
+			end
+		else
+			d.line.Visible = false
+		end
+	end
+end
+
+--=====================================================================
+-- PLAYER TRACKING
+--=====================================================================
+local function bindPlayer(p)
+	if p == LP then return end
+	p.CharacterAdded:Connect(function()
+		task.wait(0.35)
+		if Config.ESP.Enabled then ESP.build(p) end
+	end)
+	p.CharacterRemoving:Connect(function() ESP.remove(p) end)
+	if p.Character and Config.ESP.Enabled then
+		task.spawn(function()
+			task.wait(0.35)
+			if Config.ESP.Enabled and p.Character then ESP.build(p) end
+		end)
+	end
+end
+
+for _,p in ipairs(Players:GetPlayers()) do bindPlayer(p) end
+Players.PlayerAdded:Connect(bindPlayer)
+Players.PlayerRemoving:Connect(function(p) ESP.remove(p) end)
+
+--=====================================================================
+-- UI PREMIUM
+--=====================================================================
+local UI = U.mk("ScreenGui",{
+	Name="INX_UI", ResetOnSpawn=false,
+	ZIndexBehavior=Enum.ZIndexBehavior.Sibling, DisplayOrder=10, Parent=PGui})
+
+local isMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
+local ACC   = Color3.fromRGB(0,200,255)
+local ACC2  = Color3.fromRGB(120,60,255)
+local BG    = Color3.fromRGB(14,14,20)
+local BG2   = Color3.fromRGB(22,22,30)
+local BG3   = Color3.fromRGB(30,30,42)
+local TXT   = Color3.fromRGB(235,235,245)
+local SUB   = Color3.fromRGB(140,140,160)
+
+local Win = U.mk("Frame",{
+	Name="Win", AnchorPoint=Vector2.new(0.5,0.5),
+	Position=UDim2.fromScale(0.5,0.5),
+	Size = isMobile and UDim2.fromOffset(340,470) or UDim2.fromOffset(560,520),
+	BackgroundColor3=BG, BorderSizePixel=0, Visible=false, Active=true,
+	ClipsDescendants=true, Parent=UI})
+U.corner(Win, 14)
+U.stroke(Win, ACC, 1.2, 0.35)
+
+local Head = U.mk("Frame",{
+	Name="Head", Size=UDim2.new(1,0,0,52),
+	BackgroundColor3=BG2, BorderSizePixel=0, Parent=Win})
+U.mk("UIGradient",{
+	Color=ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(35,25,70)),
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(20,20,40)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(10,20,45)),
+	}), Parent=Head})
+
+local logo = U.mk("Frame",{
+	Position=UDim2.fromOffset(14,14), Size=UDim2.fromOffset(24,24),
+	BackgroundColor3=ACC, BorderSizePixel=0, Parent=Head})
+U.corner(logo, 7)
+U.mk("UIGradient",{Color=ColorSequence.new(ACC, ACC2), Rotation=45, Parent=logo})
+local logoInner = U.mk("Frame",{
+	AnchorPoint=Vector2.new(0.5,0.5), Position=UDim2.fromScale(0.5,0.5),
+	Size=UDim2.fromOffset(10,10), BackgroundColor3=BG2, BorderSizePixel=0, Parent=logo})
+U.corner(logoInner, 3)
+
+local titleL = U.mk("TextLabel",{
+	Position=UDim2.fromOffset(48,0), Size=UDim2.new(1,-140,1,0),
+	BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+	Text="InfinityNex Cheats", TextSize=17, TextColor3=TXT,
+	TextXAlignment=Enum.TextXAlignment.Left, Parent=Head})
+U.mk("UIGradient",{
+	Color=ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(255,255,255)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(150,220,255)),
+	}), Parent=titleL})
+
+local statusDot = U.mk("Frame",{
+	AnchorPoint=Vector2.new(1,0.5), Position=UDim2.new(1,-52,0.5,0),
+	Size=UDim2.fromOffset(8,8), BackgroundColor3=Color3.fromRGB(60,220,120),
+	BorderSizePixel=0, Parent=Head})
+U.corner(statusDot, 4)
+
+local closeB = U.mk("TextButton",{
+	AnchorPoint=Vector2.new(1,0.5), Position=UDim2.new(1,-14,0.5,0),
+	Size=UDim2.fromOffset(28,28), BackgroundColor3=Color3.fromRGB(40,40,55),
+	Text="X", Font=Enum.Font.GothamBold, TextSize=14,
+	TextColor3=TXT, AutoButtonColor=false, Parent=Head})
+U.corner(closeB, 8)
+
+local TabsBar = U.mk("Frame",{
+	Position=UDim2.fromOffset(0,52), Size=UDim2.new(1,0,0,44),
+	BackgroundColor3=BG2, BorderSizePixel=0, Parent=Win})
+
+local Content = U.mk("Frame",{
+	Position=UDim2.fromOffset(0,96), Size=UDim2.new(1,0,1,-96),
+	BackgroundTransparency=1, Parent=Win})
+
+local Tabs = {}
+local Pages = {}
+local TAB_COUNT = 4
+local function switchTab(n)
+	for k,pg in pairs(Pages) do pg.Visible = (k==n) end
+	for k,b in pairs(Tabs) do
+		TweenService:Create(b, TweenInfo.new(0.15), {
+			BackgroundColor3 = (k==n) and ACC or Color3.fromRGB(28,28,38),
+			TextColor3 = (k==n) and Color3.fromRGB(255,255,255) or SUB,
+		}):Play()
+	end
+end
+
+local function newTab(id,label,idx)
+	local b = U.mk("TextButton",{
+		Position=UDim2.new((idx-1)/TAB_COUNT,4,0,4),
+		Size=UDim2.new(1/TAB_COUNT,-8,1,-8),
+		BackgroundColor3=Color3.fromRGB(28,28,38),
+		Text=label, Font=Enum.Font.GothamBold, TextSize=11,
+		TextColor3=SUB, AutoButtonColor=false, Parent=TabsBar})
+	U.corner(b, 8)
+	b.MouseButton1Click:Connect(function() switchTab(id) end)
+	Tabs[id] = b
+
+	local pg = U.mk("ScrollingFrame",{
+		Size=UDim2.fromScale(1,1), BackgroundTransparency=1,
+		BorderSizePixel=0, ScrollBarThickness=4,
+		ScrollBarImageColor3=ACC, CanvasSize=UDim2.new(),
+		AutomaticCanvasSize=Enum.AutomaticSize.Y,
+		Visible=false, Parent=Content})
+	U.mk("UIPadding",{
+		PaddingTop=UDim.new(0,10), PaddingLeft=UDim.new(0,14),
+		PaddingRight=UDim.new(0,14), PaddingBottom=UDim.new(0,14), Parent=pg})
+	U.mk("UIListLayout",{
+		Padding=UDim.new(0,10), SortOrder=Enum.SortOrder.LayoutOrder, Parent=pg})
+	Pages[id]=pg
+	return pg
+end
+
+local function newSection(parent, title)
+	local holder = U.mk("Frame",{
+		Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
+		BackgroundColor3=BG2, BorderSizePixel=0, Parent=parent})
+	U.corner(holder, 10)
+	U.stroke(holder, Color3.fromRGB(45,45,65), 1, 0.4)
+	U.mk("UIPadding",{
+		PaddingTop=UDim.new(0,10), PaddingBottom=UDim.new(0,10),
+		PaddingLeft=UDim.new(0,12), PaddingRight=UDim.new(0,12), Parent=holder})
+	U.mk("UIListLayout",{
+		Padding=UDim.new(0,8), SortOrder=Enum.SortOrder.LayoutOrder, Parent=holder})
+	U.mk("TextLabel",{
+		Size=UDim2.new(1,0,0,14), BackgroundTransparency=1,
+		Font=Enum.Font.GothamBold, Text=title:upper(),
+		TextSize=10, TextColor3=ACC,
+		TextXAlignment=Enum.TextXAlignment.Left, Parent=holder})
+	return holder
+end
+
+local function newToggle(parent,label,get,set)
+	local row = U.mk("Frame",{
+		Size=UDim2.new(1,0,0,26), BackgroundTransparency=1, Parent=parent})
+	U.mk("TextLabel",{
+		Size=UDim2.new(1,-60,1,0), BackgroundTransparency=1,
+		Text=label, Font=Enum.Font.GothamMedium, TextSize=13,
+		TextColor3=TXT, TextXAlignment=Enum.TextXAlignment.Left, Parent=row})
+	local btn = U.mk("TextButton",{
+		AnchorPoint=Vector2.new(1,0.5), Position=UDim2.new(1,0,0.5,0),
+		Size=UDim2.fromOffset(44,22), BackgroundColor3=Color3.fromRGB(40,40,55),
+		Text="", AutoButtonColor=false, Parent=row})
+	U.corner(btn, 11)
+	local knob = U.mk("Frame",{
+		Position=UDim2.new(0,2,0.5,-8), Size=UDim2.fromOffset(16,16),
+		BackgroundColor3=Color3.fromRGB(180,180,195),
+		BorderSizePixel=0, Parent=btn})
+	U.corner(knob, 8)
+
+	local state = get()
+	local function render()
+		local pos = state and UDim2.new(1,-18,0.5,-8) or UDim2.new(0,2,0.5,-8)
+		local bgc = state and ACC or Color3.fromRGB(40,40,55)
+		local knc = state and Color3.fromRGB(255,255,255) or Color3.fromRGB(180,180,195)
+		TweenService:Create(knob, TweenInfo.new(0.18), {Position=pos, BackgroundColor3=knc}):Play()
+		TweenService:Create(btn,  TweenInfo.new(0.18), {BackgroundColor3=bgc}):Play()
+	end
+	render()
+	btn.MouseButton1Click:Connect(function()
+		state = not state; set(state); render()
+	end)
+	return row
+end
+
+local function newSlider(parent,label,minV,maxV,get,set)
+	local row = U.mk("Frame",{
+		Size=UDim2.new(1,0,0,36), BackgroundTransparency=1, Parent=parent})
+	local lbl = U.mk("TextLabel",{
+		Size=UDim2.new(1,0,0,16), BackgroundTransparency=1,
+		Text=label..": "..tostring(get()),
+		Font=Enum.Font.GothamMedium, TextSize=12, TextColor3=TXT,
+		TextXAlignment=Enum.TextXAlignment.Left, Parent=row})
+	local track = U.mk("TextButton",{
+		Position=UDim2.new(0,0,1,-12), Size=UDim2.new(1,0,0,6),
+		BackgroundColor3=Color3.fromRGB(40,40,55), Text="",
+		AutoButtonColor=false, Parent=row})
+	U.corner(track, 3)
+	local fill = U.mk("Frame",{
+		Size=UDim2.new(0,0,1,0), BackgroundColor3=ACC,
+		BorderSizePixel=0, Parent=track})
+	U.corner(fill, 3)
+	U.mk("UIGradient",{Color=ColorSequence.new(ACC, ACC2), Parent=fill})
+
+	local function setX(px)
+		local rel = math.clamp((px - track.AbsolutePosition.X)/math.max(track.AbsoluteSize.X,1),0,1)
+		local v = minV + (maxV-minV)*rel
+		v = (maxV-minV)>=20 and math.floor(v+0.5) or math.floor(v*100+0.5)/100
+		set(v); lbl.Text = label..": "..tostring(v)
+		fill.Size = UDim2.new(rel,0,1,0)
+	end
+	local rel0 = math.clamp((get()-minV)/(maxV-minV), 0, 1)
+	fill.Size = UDim2.new(rel0,0,1,0)
+
+	local dr=false
+	track.InputBegan:Connect(function(i)
+		if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+			dr=true; setX(i.Position.X)
+		end
+	end)
+	track.InputEnded:Connect(function(i)
+		if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dr=false end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if dr and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
+			setX(i.Position.X)
+		end
+	end)
+end
+
+-- Seletor segmentado (Head / Torso)
+local function newSegmented(parent, label, options, get, set)
+	local row = U.mk("Frame",{
+		Size=UDim2.new(1,0,0,46), BackgroundTransparency=1, Parent=parent})
+	U.mk("TextLabel",{
+		Size=UDim2.new(1,0,0,16), BackgroundTransparency=1,
+		Text=label, Font=Enum.Font.GothamMedium, TextSize=12,
+		TextColor3=TXT, TextXAlignment=Enum.TextXAlignment.Left, Parent=row})
+
+	local bar = U.mk("Frame",{
+		Position=UDim2.new(0,0,0,20), Size=UDim2.new(1,0,0,26),
+		BackgroundColor3=Color3.fromRGB(30,30,42),
+		BorderSizePixel=0, Parent=row})
+	U.corner(bar, 8)
+
+	local btns = {}
+	local n = #options
+	local function refresh()
+		local cur = get()
+		for i,opt in ipairs(options) do
+			local b = btns[opt]
+			local active = (cur == opt)
+			TweenService:Create(b, TweenInfo.new(0.15), {
+				BackgroundColor3 = active and ACC or Color3.fromRGB(30,30,42),
+				TextColor3 = active and Color3.fromRGB(255,255,255) or SUB,
+			}):Play()
+		end
+	end
+
+	for i,opt in ipairs(options) do
+		local b = U.mk("TextButton",{
+			Position=UDim2.new((i-1)/n, 2, 0, 2),
+			Size=UDim2.new(1/n, -4, 1, -4),
+			BackgroundColor3=Color3.fromRGB(30,30,42),
+			Text=tostring(opt), Font=Enum.Font.GothamBold,
+			TextSize=12, TextColor3=SUB,
+			AutoButtonColor=false, Parent=bar})
+		U.corner(b, 6)
+		b.MouseButton1Click:Connect(function() set(opt); refresh() end)
+		btns[opt] = b
+	end
+	refresh()
+	return row
+end
+
+-- ABA AIM --------------------------------------------------------------
+local aimPg = newTab("aim","AIM",1)
+local secA = newSection(aimPg,"Aim Assist")
+newToggle(secA,"Ativar Aim Assist",function() return Config.Aim.Enabled end,
+	function(v) Config.Aim.Enabled=v; refreshFOV() end)
+newToggle(secA,"Mostrar círculo FOV",function() return Config.Aim.ShowFOV end,
+	function(v) Config.Aim.ShowFOV=v; refreshFOV() end)
+newToggle(secA,"Ignorar aliados",function() return Config.Aim.TeamCheck end,
+	function(v) Config.Aim.TeamCheck=v end)
+
+local secT = newSection(aimPg,"Alvo")
+newSegmented(secT,"Parte do alvo (mira da câmera)",{"Head","Torso"},
+	function() return Config.Aim.TargetPart end,
+	function(v) Config.Aim.TargetPart = v end)
+
+local secF = newSection(aimPg,"FOV")
+newSlider(secF,"Raio (px)",30,400,function() return Config.Aim.Radius end,
+	function(v) Config.Aim.Radius=v; refreshFOV() end)
+newSlider(secF,"Transparência",0,1,function() return Config.Aim.Transparency end,
+	function(v) Config.Aim.Transparency=v; refreshFOV() end)
+newSlider(secF,"Espessura",0.5,6,function() return Config.Aim.Thickness end,
+	function(v) Config.Aim.Thickness=v; refreshFOV() end)
+
+local secB = newSection(aimPg,"Comportamento")
+newSlider(secB,"Distância máx",50,2000,function() return Config.Aim.MaxDist end,
+	function(v) Config.Aim.MaxDist=v end)
+newSlider(secB,"Suavização",0.02,1,function() return Config.Aim.Smooth end,
+	function(v) Config.Aim.Smooth=v end)
+newSlider(secB,"Intensidade",0.1,3,function() return Config.Aim.Intensity end,
+	function(v) Config.Aim.Intensity=v end)
+
+-- ABA ESP --------------------------------------------------------------
+local espPg = newTab("esp","ESP",2)
+local secE = newSection(espPg,"ESP Geral")
+newToggle(secE,"Ativar ESP",function() return Config.ESP.Enabled end,
+	function(v)
+		Config.ESP.Enabled=v
+		if v then
+			for _,p in ipairs(Players:GetPlayers()) do
+				if p ~= LP then ESP.build(p) end
+			end
+		else ESP.clear() end
+	end)
+newToggle(secE,"Ignorar aliados",function() return Config.ESP.TeamCheck end,
+	function(v) Config.ESP.TeamCheck=v end)
+newToggle(secE,"ESP Line",function() return Config.ESP.Line end,
+	function(v) Config.ESP.Line=v end)
+newToggle(secE,"ESP Box (3D)",function() return Config.ESP.Box end,
+	function(v)
+		Config.ESP.Box=v
+		local list = {}
+		for p in pairs(tracked) do table.insert(list,p) end
+		for _,p in ipairs(list) do ESP.remove(p) end
+		if Config.ESP.Enabled then
+			for _,p in ipairs(Players:GetPlayers()) do
+				if p~=LP then ESP.build(p) end
+			end
+		end
+	end)
+
+local secI = newSection(espPg,"Informações")
+newToggle(secI,"Mostrar nome",function() return Config.ESP.Name end,
+	function(v) Config.ESP.Name=v end)
+newToggle(secI,"Mostrar distância",function() return Config.ESP.Dist end,
+	function(v) Config.ESP.Dist=v end)
+newToggle(secI,"Mostrar vida",function() return Config.ESP.Health end,
+	function(v) Config.ESP.Health=v end)
+
+-- ABA AUTO FIRE --------------------------------------------------------
+local afPg = newTab("af","AUTO",3)
+local secAf = newSection(afPg,"Auto Fire")
+newToggle(secAf,"Ativar Auto Fire",function() return Config.AutoFire.Enabled end,
+	function(v) Config.AutoFire.Enabled=v end)
+newToggle(secAf,"Só com Aim ligado",function() return Config.AutoFire.RequireAim end,
+	function(v) Config.AutoFire.RequireAim=v end)
+newSlider(secAf,"Distância p/ atirar (studs)",10,150,
+	function() return Config.AutoFire.MaxDist end,
+	function(v) Config.AutoFire.MaxDist=v end)
+newSlider(secAf,"Delay entre tiros (s)",0.05,1,
+	function() return Config.AutoFire.Delay end,
+	function(v) Config.AutoFire.Delay=v end)
+
+-- ABA CONFIG -----------------------------------------------------------
+local cfgPg = newTab("cfg","CFG",4)
+local secK = newSection(cfgPg,"Teclas")
+local kRow = U.mk("Frame",{
+	Size=UDim2.new(1,0,0,26), BackgroundTransparency=1, Parent=secK})
+U.mk("TextLabel",{
+	Size=UDim2.new(1,-120,1,0), BackgroundTransparency=1,
+	Text="Tecla Aim Assist", Font=Enum.Font.GothamMedium,
+	TextSize=13, TextColor3=TXT,
+	TextXAlignment=Enum.TextXAlignment.Left, Parent=kRow})
+local kBt = U.mk("TextButton",{
+	AnchorPoint=Vector2.new(1,0.5), Position=UDim2.new(1,0,0.5,0),
+	Size=UDim2.fromOffset(110,24), BackgroundColor3=BG3,
+	Text=Config.Aim.Key.Name, Font=Enum.Font.GothamBold,
+	TextSize=12, TextColor3=TXT, AutoButtonColor=false, Parent=kRow})
+U.corner(kBt, 6); U.stroke(kBt, ACC, 1, 0.6)
+local awaiting=false
+kBt.MouseButton1Click:Connect(function() awaiting=true; kBt.Text="..." end)
+UIS.InputBegan:Connect(function(i,g)
+	if g then return end
+	if awaiting and i.UserInputType==Enum.UserInputType.Keyboard then
+		Config.Aim.Key=i.KeyCode; kBt.Text=i.KeyCode.Name; awaiting=false
+	end
+end)
+
+local secInfo = newSection(cfgPg,"Sistema")
+U.mk("TextLabel",{
+	Size=UDim2.new(1,0,0,14), BackgroundTransparency=1,
+	Text="Dispositivo: "..(isMobile and "Mobile" or "PC"),
+	Font=Enum.Font.GothamMedium, TextSize=12, TextColor3=SUB,
+	TextXAlignment=Enum.TextXAlignment.Left, Parent=secInfo})
+U.mk("TextLabel",{
+	Size=UDim2.new(1,0,0,14), BackgroundTransparency=1,
+	Text="Versão: 1.2.0", Font=Enum.Font.GothamMedium,
+	TextSize=12, TextColor3=SUB,
+	TextXAlignment=Enum.TextXAlignment.Left, Parent=secInfo})
+
+switchTab("aim")
+
+--=====================================================================
+-- BOTÃO FLUTUANTE
+--=====================================================================
+local FBGui = U.mk("ScreenGui",{
+	Name="INX_FB", ResetOnSpawn=false,
+	ZIndexBehavior=Enum.ZIndexBehavior.Sibling, DisplayOrder=20, Parent=PGui})
+
+local FB = U.mk("TextButton",{
+	Name="FB", AnchorPoint=Vector2.new(1,0.5),
+	Position=UDim2.new(1,-18,0.5,0),
+	Size=UDim2.fromOffset(62,62), BackgroundColor3=BG2,
+	Text="", AutoButtonColor=false, Parent=FBGui})
+U.corner(FB, 31)
+local fbStroke = U.stroke(FB, ACC, 1.5, 0.2)
+U.mk("UIGradient",{Color=ColorSequence.new(ACC, ACC2), Rotation=45, Parent=FB})
+
+local fbGlow = U.mk("Frame",{
+	AnchorPoint=Vector2.new(0.5,0.5), Position=UDim2.fromScale(0.5,0.5),
+	Size=UDim2.fromOffset(70,70), BackgroundColor3=ACC,
+	BackgroundTransparency=0.75, BorderSizePixel=0, Parent=FB})
+U.corner(fbGlow, 35)
+fbGlow.ZIndex = -1
+
+local fbIcon = U.mk("TextLabel",{
+	Size=UDim2.fromScale(1,1), BackgroundTransparency=1,
+	Text="+", Font=Enum.Font.GothamBold, TextSize=26,
+	TextColor3=Color3.fromRGB(255,255,255), Parent=FB})
+
+local function updateFB()
+	local on = Config.Aim.Enabled
+	TweenService:Create(FB, TweenInfo.new(0.2), {
+		BackgroundColor3 = on and ACC or BG2,
+	}):Play()
+	fbStroke.Transparency = on and 0 or 0.6
+	fbGlow.BackgroundTransparency = on and 0.4 or 0.9
+	fbIcon.TextColor3 = on and Color3.fromRGB(255,255,255) or Color3.fromRGB(150,150,170)
+end
+updateFB()
+
+task.spawn(function()
+	while true do
+		task.wait(0.05)
+		if Config.Aim.Enabled then
+			local pulse = 1 + math.sin(tick()*4)*0.06
+			local sz = 62 * pulse
+			fbGlow.Size = UDim2.fromOffset(sz+14, sz+14)
+		else
+			fbGlow.Size = UDim2.fromOffset(70,70)
+		end
+	end
+end)
+
+local dgB, dStart, sPos
+FB.InputBegan:Connect(function(i)
+	if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then
+		dgB=true; dStart=i.Position; sPos=FB.Position
+	end
+end)
+UIS.InputChanged:Connect(function(i)
+	if not dgB then return end
+	if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseMovement then
+		local d = i.Position - dStart
+		FB.Position = UDim2.new(sPos.X.Scale, sPos.X.Offset+d.X, sPos.Y.Scale, sPos.Y.Offset+d.Y)
+	end
+end)
+UIS.InputEnded:Connect(function(i)
+	if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then
+		if dgB then
+			local moved = (i.Position - dStart).Magnitude
+			dgB=false
+			if moved < 8 then
+				Config.Aim.Enabled = not Config.Aim.Enabled
+				refreshFOV(); updateFB()
+			end
+		end
+	end
+end)
+
+--=====================================================================
+-- INPUT PC
+--=====================================================================
+UIS.InputBegan:Connect(function(i,g)
+	if g then return end
+	if i.KeyCode == Config.Aim.Key then
+		Config.Aim.Enabled = not Config.Aim.Enabled
+		refreshFOV(); updateFB()
+	end
+end)
+
+local function toggleWin()
+	Win.Visible = not Win.Visible
+	if Win.Visible then
+		Win.Size = UDim2.fromOffset(0,0)
+		TweenService:Create(Win, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+			Size = isMobile and UDim2.fromOffset(340,470) or UDim2.fromOffset(560,520),
+		}):Play()
+	end
+end
+
+closeB.MouseButton1Click:Connect(function()
+	TweenService:Create(Win, TweenInfo.new(0.15), {Size=UDim2.fromOffset(0,0)}):Play()
+	task.delay(0.15, function() Win.Visible=false end)
+end)
+
+UIS.InputBegan:Connect(function(i,g)
+	if g then return end
+	if i.KeyCode == Enum.KeyCode.RightControl then toggleWin() end
+end)
+
+local lpT
+FB.InputBegan:Connect(function(i)
+	if i.UserInputType==Enum.UserInputType.Touch then
+		lpT = task.delay(0.55, function() toggleWin(); dgB=false end)
+	end
+end)
+UIS.InputEnded:Connect(function(i)
+	if i.UserInputType==Enum.UserInputType.Touch and lpT then
+		task.cancel(lpT); lpT=nil
+	end
+end)
+
+do
+	local dr, ds, sp
+	Head.InputBegan:Connect(function(i)
+		if i.UserInputType==Enum.UserInputType.MouseButton1 then
+			dr=true; ds=i.Position; sp=Win.Position
+		end
+	end)
+	Head.InputEnded:Connect(function(i)
+		if i.UserInputType==Enum.UserInputType.MouseButton1 then dr=false end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if dr and i.UserInputType==Enum.UserInputType.MouseMovement then
+			local d = i.Position - ds
+			Win.Position = UDim2.new(sp.X.Scale, sp.X.Offset+d.X, sp.Y.Scale, sp.Y.Offset+d.Y)
+		end
+	end)
+end
+
+--=====================================================================
+-- LOOPS
+--=====================================================================
+RunService.RenderStepped:Connect(function(dt) Aim.step(dt) end)
+
+local acc=0
+RunService.Heartbeat:Connect(function(dt)
+	acc += dt
+	if acc >= 0.05 then
+		acc = 0
+		ESP.step()
+		AutoFire.step()
+	end
+end)
+
+Camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+	FOV.Position = UDim2.fromScale(0.5,0.5)
+end)
+
+game:BindToClose(function() ESP.clear() end)
+
+print("[InfinityNex Cheats v1.2] Carregado com sucesso!")
